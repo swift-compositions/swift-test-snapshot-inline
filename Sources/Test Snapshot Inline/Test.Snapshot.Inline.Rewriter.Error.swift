@@ -1,35 +1,15 @@
+// This source file is part of the swift-test-snapshot-inline open source project
 //
-//  Test.Snapshot.Inline.Rewriter.Error.swift
-//  swift-tests
-//
-//  Errors from inline snapshot source rewriting.
-//
+// Copyright (c) 2024-2026 Coen ten Thije Boonkkamp and the swift-test-snapshot-inline project authors
+// Licensed under Apache License v2.0
 
-public import Test_Primitives
+public import Test
+public import Test_Snapshot
 
-extension Test_Primitives.Test.Snapshot.Inline.Rewriter {
-    /// Errors that occur during inline snapshot source file rewriting.
+extension Test.Snapshot.Inline.Rewriter {
     public enum Error: Swift.Error, Sendable {
-        /// Failed to read the source file.
-        ///
-        /// - Parameters:
-        ///   - path: The file path that could not be read.
-        ///   - underlying: Description of the underlying error.
-        case readFailed(path: Swift.String, underlying: Swift.String)
-
-        /// Failed to write the modified source file.
-        ///
-        /// - Parameters:
-        ///   - path: The file path that could not be written.
-        ///   - underlying: Description of the underlying error.
-        case writeFailed(path: Swift.String, underlying: Swift.String)
-
-        /// The call site could not be found at the expected location.
-        ///
-        /// - Parameters:
-        ///   - path: The source file path.
-        ///   - line: The expected line number.
-        ///   - column: The expected column number.
-        case callSiteNotFound(path: Swift.String, line: Int, column: Int)
+        case read(path: Swift.String, underlying: Swift.String)
+        case write(path: Swift.String, underlying: Swift.String)
+        case callSite(path: Swift.String, line: Int, column: Int)
     }
 }

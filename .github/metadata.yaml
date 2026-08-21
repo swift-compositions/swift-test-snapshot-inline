@@ -1,0 +1,9 @@
+description: "Test × Snapshot inline specialization with actor-isolated state and SwiftSyntax source rewriting."
+topics:
+  - foundations
+  - testing
+  - snapshot
+  - swift-syntax
+homepage: "https://swift-institute.org"
+readme:
+  family: E

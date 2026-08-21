@@ -1,333 +1,163 @@
+// This source file is part of the swift-test-snapshot-inline open source project
 //
-//  Test.Snapshot.Inline.Rewriter.swift
-//  swift-tests
-//
-//  SwiftSyntax-based source file rewriter for inline snapshots.
-//
+// Copyright (c) 2024-2026 Coen ten Thije Boonkkamp and the swift-test-snapshot-inline project authors
+// Licensed under Apache License v2.0
 
-import File_System
-import SwiftParser
-import SwiftSyntax
-import SwiftSyntaxBuilder
-public import Test_Primitives
+internal import File_System
+internal import SwiftParser
+internal import SwiftSyntax
+internal import SwiftSyntaxBuilder
+public import Test
+public import Test_Snapshot
 
-extension Test_Primitives.Test.Snapshot.Inline {
-    /// SwiftSyntax-based source file rewriter for inline snapshots.
-    ///
-    /// Processes accumulated ``State/Entry`` values by parsing each source
-    /// file, locating the call sites by line/column, and inserting or
-    /// replacing trailing closures containing the snapshot value.
-    public enum Rewriter {
-    }
+extension Test.Snapshot.Inline {
+    public enum Rewriter {}
 }
 
-extension Test_Primitives.Test.Snapshot.Inline.Rewriter {
-    /// Writes all pending inline snapshots to their source files.
-    ///
-    /// For each source file with pending entries:
-    /// 1. Reads the source
-    /// 2. Parses with SwiftParser
-    /// 3. Rewrites call sites using a `SyntaxRewriter`
-    /// 4. Writes the modified source atomically
-    ///
-    /// - Parameter entries: Entries grouped by source file path.
-    /// - Throws: ``Error`` if reading, parsing, or writing fails.
+extension Test.Snapshot.Inline.Rewriter {
+    // swift-linter:disable:next compound identifier
+    // REASON: This is the single batch counterpart to rewrite; a one-member namespace adds no seam.
     public static func writeAll(
-        from entries: [Swift.String: [Test_Primitives.Test.Snapshot.Inline.State.Entry]]
+        _ entries: [Swift.String: [Test.Snapshot.Inline.Entry]]
     ) throws(Error) {
-        for (filePath, fileEntries) in entries {
-            try rewriteFile(at: filePath, entries: fileEntries)
-        }
-    }
-}
-
-// MARK: - File Rewriting
-
-extension Test_Primitives.Test.Snapshot.Inline.Rewriter {
-    /// Rewrites a single source file with the given entries.
-    private static func rewriteFile(
-        at filePath: Swift.String,
-        entries: [Test_Primitives.Test.Snapshot.Inline.State.Entry]
-    ) throws(Error) {
-        // Read source
-        let source: Swift.String
-        do throws(Either<File.System.Read.Full.Error, Never>) {
-            source = try File(File.Path(stringLiteral: filePath)).read.full { span in
-                unsafe span.withUnsafeBufferPointer { buffer in
-                    unsafe Swift.String(decoding: buffer, as: UTF8.self)
+        for (path, values) in entries {
+            let file = File(File.Path(stringLiteral: path))
+            let source: Swift.String
+            do throws(Either<File.System.Read.Full.Error, Never>) {
+                source = try file.read.full { span in
+                    span.withUnsafeBufferPointer { unsafe Swift.String(decoding: $0, as: UTF8.self) }
                 }
+            } catch {
+                throw .read(path: path, underlying: Swift.String(describing: error))
             }
-        } catch {
-            throw .readFailed(path: filePath, underlying: Swift.String(describing: error))
+
+            let output = try rewrite(source: source, path: path, entries: values)
+            do throws(File.System.Write.Atomic.Error) {
+                try file.write.atomic(output)
+            } catch {
+                throw .write(path: path, underlying: Swift.String(describing: error))
+            }
         }
+    }
 
-        // Parse
-        let sourceFile = Parser.parse(source: source)
-        let locationConverter = SourceLocationConverter(
-            fileName: filePath,
-            tree: sourceFile
+    public static func rewrite(
+        source: Swift.String,
+        path: Swift.String,
+        entries: [Test.Snapshot.Inline.Entry]
+    ) throws(Error) -> Swift.String {
+        let tree = Parser.parse(source: source)
+        let converter = SourceLocationConverter(fileName: path, tree: tree)
+        let syntax = Syntax(
+            entries: entries.sorted {
+                ($0.line, $0.column) < ($1.line, $1.column)
+            },
+            converter: converter
         )
-
-        // Sort entries by line ascending to match SyntaxRewriter's
-        // top-to-bottom traversal order.
-        let sorted = entries.sorted { $0.line < $1.line }
-
-        // Apply rewrites
-        let rewriter = Syntax(
-            entries: sorted,
-            locationConverter: locationConverter
-        )
-        let rewritten = rewriter.visit(sourceFile)
-
-        // Write result
-        let output = rewritten.description
-        do throws(File.System.Write.Atomic.Error) {
-            try File(File.Path(stringLiteral: filePath)).write.atomic(output)
-        } catch {
-            throw .writeFailed(path: filePath, underlying: Swift.String(describing: error))
+        let rewritten = syntax.visit(tree)
+        if let missing = syntax.missing {
+            throw .callSite(path: path, line: missing.line, column: missing.column)
         }
+        return rewritten.description
     }
 }
 
-// MARK: - Syntax Rewriter
-
-extension Test_Primitives.Test.Snapshot.Inline.Rewriter {
-    /// Visits call sites and rewrites matching snapshot calls with the
-    /// recorded expected value.
+extension Test.Snapshot.Inline.Rewriter {
     private final class Syntax: SyntaxRewriter {
-        let entries: [Test_Primitives.Test.Snapshot.Inline.State.Entry]
-        let locationConverter: SourceLocationConverter
-        private var entryIndex = 0
+        let entries: [Test.Snapshot.Inline.Entry]
+        let converter: SourceLocationConverter
+        private var index = 0
 
-        init(
-            entries: [Test_Primitives.Test.Snapshot.Inline.State.Entry],
-            locationConverter: SourceLocationConverter
-        ) {
+        init(entries: [Test.Snapshot.Inline.Entry], converter: SourceLocationConverter) {
             self.entries = entries
-            self.locationConverter = locationConverter
+            self.converter = converter
+            super.init(viewMode: .sourceAccurate)
+        }
+
+        var missing: Test.Snapshot.Inline.Entry? {
+            index < entries.count ? entries[index] : nil
         }
 
         override func visit(_ node: FunctionCallExprSyntax) -> ExprSyntax {
-            guard entryIndex < entries.count else {
+            guard index < entries.count else { return super.visit(node) }
+            let entry = entries[index]
+            let location = node.startLocation(converter: converter)
+            guard location.line == entry.line, location.column == entry.column else {
                 return super.visit(node)
             }
-
-            let entry = entries[entryIndex]
-            let location = node.startLocation(converter: locationConverter)
-
-            guard location.line == entry.line else {
+            let name = node.calledExpression.trimmedDescription
+            guard name == "snapshot" || name == "assert" || name.hasSuffix(".assert") else {
                 return super.visit(node)
             }
-
-            guard isSnapshotCall(node) else {
-                return super.visit(node)
-            }
-
-            entryIndex += 1
-
-            let updated = applySnapshotFunction(to: node, value: entry.actual)
-            return super.visit(updated)
+            index += 1
+            return super.visit(apply(entry.actual, to: node))
         }
-
     }
 }
 
-// MARK: - Call Site Detection
-
-/// Checks whether a function call is a `snapshot(as:)` call.
-private func isSnapshotCall(_ node: FunctionCallExprSyntax) -> Bool {
-    node.calledExpression.trimmedDescription == "snapshot"
-}
-
-// MARK: - Snapshot Application
-
-/// Applies the inline snapshot value to a `snapshot(as:)` function call site.
-///
-/// For `snapshot(as:) { value } matches: { expected }`, the expected value
-/// goes in a `matches:` additional trailing closure. The first trailing
-/// closure (value) is preserved.
-private func applySnapshotFunction(
-    to node: FunctionCallExprSyntax,
-    value: Swift.String
+private func apply(
+    _ value: Swift.String,
+    to node: FunctionCallExprSyntax
 ) -> FunctionCallExprSyntax {
-    let indent = extractIndentation(from: node)
-    let closureExpr = buildSnapshotClosure(value: value, indent: indent)
-
-    var updated = node
-
-    // Remove existing `matches:` additional trailing closure if present.
-    let filtered = updated.additionalTrailingClosures.filter {
-        $0.label.text != "matches"
-    }
-    updated = updated.with(
+    let indent = indentation(of: node)
+    let closure = snapshotClosure(value: value, indent: indent)
+    var updated = node.with(
         \.additionalTrailingClosures,
-        filtered
+        node.additionalTrailingClosures.filter { $0.label.text != "matches" }
     )
-
-    // Build the `matches:` additional trailing closure element.
-    let matchesElement = MultipleTrailingClosureElementSyntax(
+    let matches = MultipleTrailingClosureElementSyntax(
         leadingTrivia: .space,
         label: .identifier("matches"),
         colon: .colonToken(trailingTrivia: .space),
-        closure: closureExpr.with(\.leadingTrivia, [])
+        closure: closure.with(\.leadingTrivia, [])
     )
-
-    // Append to additional trailing closures.
     updated = updated.with(
         \.additionalTrailingClosures,
-        MultipleTrailingClosureElementListSyntax(
-            updated.additionalTrailingClosures + [matchesElement]
-        )
+        updated.additionalTrailingClosures + [matches]
     )
-
     return updated
 }
 
-// MARK: - Closure Builder
-
-/// Builds a `ClosureExprSyntax` containing a multiline string literal
-/// with the snapshot value.
-private func buildSnapshotClosure(
-    value: Swift.String,
-    indent: Swift.String
-) -> ClosureExprSyntax {
-    let innerIndent = indent + "    "
-
-    let hashes = hashCount(for: value)
-    let hashString = Swift.String(repeating: "#", count: hashes)
-
-    let closureBody: Swift.String
-    if value.isEmpty {
-        closureBody = """
-            \(hashString)\"\"\"
-            \(innerIndent)\(hashString)\"\"\"
-            """
-    } else {
-        let indentedValue =
-            value
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line in
-                line.isEmpty ? Swift.String(line) : "\(innerIndent)\(line)"
-            }
-            .joined(separator: "\n")
-
-        closureBody = """
-            \(hashString)\"\"\"
-            \(indentedValue)
-            \(innerIndent)\(hashString)\"\"\"
-            """
-    }
-
+private func snapshotClosure(value: Swift.String, indent: Swift.String) -> ClosureExprSyntax {
+    let inner = indent + "    "
+    let hashes = Swift.String(repeating: "#", count: hashCount(for: value))
+    let content = value
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .map { $0.isEmpty ? Swift.String($0) : inner + $0 }
+        .joined(separator: "\n")
+    let literal = value.isEmpty
+        ? "\(hashes)\"\"\"\n\(inner)\(hashes)\"\"\""
+        : "\(hashes)\"\"\"\n\(content)\n\(inner)\(hashes)\"\"\""
     return ClosureExprSyntax(
         leadingTrivia: .space,
         leftBrace: .leftBraceToken(),
         statements: CodeBlockItemListSyntax([
             CodeBlockItemSyntax(
-                leadingTrivia: .newline + .spaces(innerIndent.count),
-                item: .expr(ExprSyntax(stringLiteral: "\(closureBody)"))
+                leadingTrivia: .newline + .spaces(inner.count),
+                item: .expr(ExprSyntax(stringLiteral: literal))
             )
         ]),
-        rightBrace: .rightBraceToken(
-            leadingTrivia: .newline + .spaces(indent.count)
-        )
+        rightBrace: .rightBraceToken(leadingTrivia: .newline + .spaces(indent.count))
     )
 }
 
-// MARK: - Indentation
-
-/// Extracts the leading indentation from a syntax node.
-private func extractIndentation(from node: some SyntaxProtocol) -> Swift.String {
-    var indent = ""
+private func indentation(of node: some SyntaxProtocol) -> Swift.String {
+    var result = ""
     for piece in node.leadingTrivia.pieces {
         switch piece {
-        case .spaces(let count):
-            indent = Swift.String(repeating: " ", count: count)
-
-        case .tabs(let count):
-            indent = Swift.String(repeating: "\t", count: count)
-
-        default:
-            break
+        case .spaces(let count): result = Swift.String(repeating: " ", count: count)
+        case .tabs(let count): result = Swift.String(repeating: "\t", count: count)
+        default: break
         }
     }
-    return indent
+    return result
 }
 
-// MARK: - Hash Count
-
-/// Computes the minimum number of `#` delimiters needed for a multiline
-/// extended string literal that contains the given value.
-///
-/// For a `"""..."""` literal, the problematic sequences are:
-/// - `"""` (three+ consecutive quotes) closes the literal prematurely
-/// - `\(` starts string interpolation
-///
-/// For a `#"""...#"""` literal:
-/// - `"""#` closes the literal prematurely
-/// - `\#(` starts interpolation
-///
-/// This function returns the minimum hash count that avoids all conflicts.
-func hashCount(for value: Swift.String) -> Int {
-    var needed = 0
-
-    // Track consecutive quotes to detect """ sequences
-    var consecutiveQuotes = 0
-    // Track consecutive hashes after a """ sequence
-    var hashesAfterTripleQuote = 0
-    // Whether we've seen 3+ consecutive quotes in current run
-    var inTripleQuote = false
-
-    // Track \#...# sequences for escape/interpolation prevention.
-    // -1 means not after a backslash; >= 0 counts consecutive #'s.
-    var hashesAfterBackslash = -1
-
-    for character in value {
-        // When tracking a \#...# sequence, accumulate hashes.
-        if hashesAfterBackslash >= 0 {
-            if character == "#" {
-                hashesAfterBackslash += 1
-                // \#^N in an N-hash literal is an escape prefix → need N+1
-                needed = max(needed, hashesAfterBackslash + 1)
-                consecutiveQuotes = 0
-                inTripleQuote = false
-                hashesAfterTripleQuote = 0
-                continue
-            } else {
-                // Sequence ended; fall through to normal processing.
-                hashesAfterBackslash = -1
-            }
-        }
-
-        switch character {
-        case "\"":
-            consecutiveQuotes += 1
-            if consecutiveQuotes >= 3 {
-                inTripleQuote = true
-                hashesAfterTripleQuote = 0
-                // At minimum we need 1 hash to distinguish from closing """
-                needed = max(needed, 1)
-            }
-
-        case "#" where inTripleQuote:
-            hashesAfterTripleQuote += 1
-            // """#...# with N hashes means we need N+1 hashes in our delimiter
-            needed = max(needed, hashesAfterTripleQuote + 1)
-
-        case "\\":
-            // Any backslash needs at least 1 hash so \n, \t, \(, etc.
-            // are not interpreted as escape sequences.
-            hashesAfterBackslash = 0
-            needed = max(needed, 1)
-            consecutiveQuotes = 0
-            inTripleQuote = false
-            hashesAfterTripleQuote = 0
-
-        default:
-            consecutiveQuotes = 0
-            inTripleQuote = false
-            hashesAfterTripleQuote = 0
-        }
+private func hashCount(for value: Swift.String) -> Int {
+    var hashes = 0
+    while value.contains("\"\"\"" + Swift.String(repeating: "#", count: hashes))
+        || value.contains("\\" + Swift.String(repeating: "#", count: hashes) + "(")
+    {
+        hashes += 1
     }
-
-    return needed
+    return hashes
 }

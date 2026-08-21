@@ -1,20 +1,26 @@
+// This source file is part of the swift-test-snapshot-inline open source project
 //
-//  Test.Snapshot.Inline.Configuration.swift
-//  swift-tests
-//
-//  Global state for inline snapshot collection.
-//
+// Copyright (c) 2024-2026 Coen ten Thije Boonkkamp and the swift-test-snapshot-inline project authors
+// Licensed under Apache License v2.0
 
-public import Test_Primitives
+public import Test
+public import Test_Snapshot
 
-extension Test_Primitives.Test.Snapshot.Inline {
-    /// Global state accumulator for the current test run.
-    ///
-    /// Entries are registered during test execution via ``assertInlineSnapshot``
-    /// and drained by the runner's post-run write-back hook. The ``State``
-    /// class uses a `Mutex` internally for concurrent safety.
-    ///
-    /// Process-global singleton is appropriate here — inline snapshot collection
-    /// spans the entire test run and must survive across individual test scopes.
-    public static let state = State()
+extension Test.Snapshot.Inline {
+    public struct Configuration: Sendable {
+        public let recording: Test.Snapshot.Recording
+        public let state: State
+
+        public init(
+            recording: Test.Snapshot.Recording = .missing,
+            state: State = .init()
+        ) {
+            self.recording = recording
+            self.state = state
+        }
+    }
+}
+
+extension Test.Snapshot.Inline.Configuration {
+    @TaskLocal public static var current = Self()
 }
