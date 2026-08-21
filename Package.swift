@@ -17,11 +17,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/swift-primitives/swift-test.git",
-            branch: "testing-stack/neutral-test-boundary"
+            branch: "main"
         ),
         .package(
             url: "https://github.com/swift-foundations/swift-test-snapshot.git",
-            branch: "testing-stack/test-snapshot"
+            branch: "main"
         ),
         .package(
             url: "https://github.com/swift-primitives/swift-snapshot.git",
